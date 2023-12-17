@@ -34,20 +34,27 @@ import xyz.gianlu.librespot.core.Session;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * @author Gianlu
  */
 public final class CdnFeedHelper {
     private static final Logger LOGGER = LoggerFactory.getLogger(CdnFeedHelper.class);
+    public static final List<String> BAD_CDNS = new ArrayList<>(List.of("audio4-gm-fb"));
 
     private CdnFeedHelper() {
     }
 
+    private static boolean isUrlBad(String url) {
+        return BAD_CDNS.stream().anyMatch(url::contains);
+    }
+
     @NotNull
-    private static HttpUrl getUrl(@NotNull Session session, @NotNull StorageResolveResponse resp) {
+    public static HttpUrl getUrl(@NotNull Session session, @NotNull StorageResolveResponse resp) {
         String selectedUrl = resp.getCdnurl(session.random().nextInt(resp.getCdnurlCount()));
-        while (selectedUrl.contains("audio4-gm-fb")) {
+        while (isUrlBad(selectedUrl)) {
             LOGGER.warn("getUrl picked CDN with known issues {} (forcing re-selection)", selectedUrl );
             selectedUrl = resp.getCdnurl(session.random().nextInt(resp.getCdnurlCount()));
         }

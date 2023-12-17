@@ -36,6 +36,7 @@ import xyz.gianlu.librespot.common.Utils;
 import xyz.gianlu.librespot.core.Session;
 import xyz.gianlu.librespot.mercury.MercuryClient;
 
+import javax.net.ssl.SSLPeerUnverifiedException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -59,8 +60,8 @@ public class CdnManager {
     @NotNull
     private InputStream getHead(@NotNull ByteString fileId) throws IOException {
         Response resp = session.client().newCall(new Request.Builder()
-                .get().url(session.getUserAttribute("head-files-url", "https://heads-fa.spotify.com/head/{file_id}").replace("{file_id}", Utils.bytesToHex(fileId).toLowerCase()))
-                .build()).execute();
+            .get().url(session.getUserAttribute("head-files-url", "https://heads-fa.spotify.com/head/{file_id}").replace("{file_id}", Utils.bytesToHex(fileId).toLowerCase()))
+            .build()).execute();
 
         if (resp.code() != 200)
             throw new IOException(resp.code() + ": " + resp.message());
@@ -75,13 +76,13 @@ public class CdnManager {
     @NotNull
     public Streamer streamExternalEpisode(@NotNull Metadata.Episode episode, @NotNull HttpUrl externalUrl, @Nullable HaltListener haltListener) throws IOException, CdnException {
         return new Streamer(new StreamId(episode), SuperAudioFormat.MP3 /* Guaranteed */, new CdnUrl(null, externalUrl),
-                session.cache(), new NoopAudioDecrypt(), haltListener);
+            session.cache(), new NoopAudioDecrypt(), haltListener);
     }
 
     @NotNull
     public Streamer streamFile(@NotNull Metadata.AudioFile file, @NotNull byte[] key, @NotNull HttpUrl url, @Nullable HaltListener haltListener) throws IOException, CdnException {
         return new Streamer(new StreamId(file), SuperAudioFormat.get(file.getFormat()), new CdnUrl(file.getFileId(), url),
-                session.cache(), new AesAudioDecrypt(key), haltListener);
+            session.cache(), new AesAudioDecrypt(key), haltListener);
     }
 
     /**
@@ -98,9 +99,7 @@ public class CdnManager {
 
             StorageResolveResponse proto = StorageResolveResponse.parseFrom(body.byteStream());
             if (proto.getResult() == StorageResolveResponse.Result.CDN) {
-                String url = proto.getCdnurl(session.random().nextInt(proto.getCdnurlCount()));
-                LOGGER.debug("Fetched CDN url for {}: {}", Utils.bytesToHex(fileId), url);
-                return HttpUrl.get(url);
+                return CdnFeedHelper.getUrl(session, proto);
             } else {
                 throw new CdnException(String.format("Could not retrieve CDN url! {result: %s}", proto.getResult()));
             }
@@ -158,6 +157,7 @@ public class CdnManager {
 
             if (fileId != null) {
                 String tokenStr = url.queryParameter("__token__");
+                String expiresStr = url.queryParameter("Expires");
                 if (tokenStr != null && !tokenStr.isEmpty()) {
                     Long expireAt = null;
                     String[] split = tokenStr.split("~");
@@ -178,6 +178,15 @@ public class CdnManager {
                     }
 
                     expiration = expireAt * 1000;
+                } else if (expiresStr != null && !expiresStr.isEmpty()) {
+                    String expiresStrVal = expiresStr.split("~")[0];
+                    try {
+                        expiration = Long.parseLong(expiresStrVal) * 1000;
+                        LOGGER.info("Expires-based expiration {} ms", expiration);
+                    } catch (NumberFormatException e) {
+                        expiration = -1;
+                        LOGGER.warn("Invalid Expires param in CDN url: {}", url);
+                    }
                 } else {
                     String param = url.queryParameterName(0);
                     int i = param.indexOf('_');
@@ -318,6 +327,15 @@ public class CdnManager {
                 InternalResponse resp = request(index);
                 writeChunk(resp.buffer, index, false);
             } catch (IOException | CdnException ex) {
+                if (ex instanceof SSLPeerUnverifiedException) {
+                    try {
+                        CdnFeedHelper.BAD_CDNS.add(cdnUrl.url().host());
+                        cdnUrl.setUrl(getAudioUrl(cdnUrl.fileId));
+                        return;
+                    } catch (CdnException | IOException | MercuryClient.MercuryException ignored) {
+                    }
+                }
+
                 LOGGER.error("Failed requesting chunk from network, index: {}", index, ex);
                 internalStream.notifyChunkError(index, new AbsChunkedInputStream.ChunkException(ex));
             }
@@ -331,8 +349,8 @@ public class CdnManager {
         @NotNull
         public synchronized InternalResponse request(int rangeStart, int rangeEnd) throws IOException, CdnException {
             try (Response resp = session.client().newCall(new Request.Builder().get().url(cdnUrl.url())
-                    .header("Range", "bytes=" + rangeStart + "-" + rangeEnd)
-                    .build()).execute()) {
+                .header("Range", "bytes=" + rangeStart + "-" + rangeEnd)
+                .build()).execute()) {
 
                 if (resp.code() != 206)
                     throw new IOException(resp.code() + ": " + resp.message());
